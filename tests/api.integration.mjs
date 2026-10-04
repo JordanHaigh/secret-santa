@@ -1,0 +1,68 @@
+// Run only against an empty LOCAL test database, with the application running.
+// node --env-file=.env.local tests/api.integration.mjs
+import assert from "node:assert/strict";
+
+const base = process.env.TEST_BASE_URL ?? process.env.APP_URL;
+if (!base || !["127.0.0.1", "localhost"].includes(new URL(base).hostname)) throw new Error("Integration tests only run against a loopback TEST_BASE_URL or APP_URL.");
+if (!process.env.ADMIN_PASSWORD) throw new Error("Set ADMIN_PASSWORD for the local test server.");
+let cookie = "";
+let assertions = 0;
+async function call(path, data, status = 200, extra = {}) {
+  const response = await fetch(`${base}${path}`, { method: data === undefined ? "GET" : "POST", headers: { Origin: base, ...(data === undefined ? {} : { "Content-Type": "application/json" }), ...(cookie ? { Cookie: cookie } : {}), ...extra }, body: data === undefined ? undefined : JSON.stringify(data) });
+  const result = await response.json();
+  assert.equal(response.status, status, `${path}: ${JSON.stringify(result)}`); assertions++;
+  return { response, result };
+}
+await call("/api/health");
+await call("/api/admin", undefined, 401);
+await call("/api/admin", { action: "draw" }, 401);
+await call("/api/admin/login", { password: "incorrect-password" }, 401);
+const login = await call("/api/admin/login", { password: process.env.ADMIN_PASSWORD });
+assert.ok(login.response.headers.get("set-cookie").includes("HttpOnly")); assertions++;
+assert.ok(login.response.headers.get("set-cookie").includes("SameSite=Strict")); assertions++;
+cookie = login.response.headers.get("set-cookie").split(";")[0];
+assert.equal((await call("/api/admin")).result.participants.length, 0, "Use an empty test exchange.");
+const signup = (name, email) => ({ name, email, notes: "Prefer green. No food, please.", wishes: [{ idea: "A lovely book", link: "https://example.com/book" }, { idea: "A plant", link: "" }, { idea: "Art supplies", link: "" }, { idea: "A surprise", link: "" }] });
+await call("/api/signup", signup("Wrong Origin", "origin@example.test"), 403, { Origin: "https://evil.example" });
+await call("/api/signup", { ...signup("Bad Link", "bad@example.test"), wishes: [{ idea: "Test", link: "javascript:alert(1)" }] }, 400);
+await call("/api/signup", signup("Alice", "alice@example.test"), 201);
+await call("/api/signup", signup("Duplicate", "ALICE@EXAMPLE.TEST"), 409);
+await Promise.all(["Bob", "Charlie", "Dana"].map(name => call("/api/signup", signup(name, `${name.toLowerCase()}@example.test`), 201)));
+let state = (await call("/api/admin")).result;
+assert.equal(state.participants.length, 4); assertions++;
+const [alice, bob, charlie, dana] = ["Alice", "Bob", "Charlie", "Dana"].map(name => state.participants.find(p => p.name === name));
+const rule = (giver, recipient, type) => ({ giver: giver.id, recipient: recipient.id, type });
+await call("/api/admin", { action: "rules", rules: [rule(alice, bob, "must"), rule(alice, bob, "cant")] }, 400);
+await call("/api/admin", { action: "rules", rules: [rule(alice, bob, "must"), rule(alice, charlie, "must")] }, 400);
+await call("/api/admin", { action: "rules", rules: [rule(alice, dana, "must"), rule(bob, dana, "must")] }, 400);
+await call("/api/admin", { action: "rules", rules: [rule(alice, alice, "must")] }, 400);
+state = (await call("/api/admin", { action: "rules", rules: [rule(alice, bob, "must"), rule(bob, alice, "cant")] })).result;
+await call("/api/admin", { action: "draw", expectedRules: [] }, 409);
+state = (await call("/api/admin", { action: "draw", expectedRules: state.rules })).result;
+assert.equal(state.allocations.length, 4); assertions++;
+assert.equal(new Set(state.allocations.map(a => a.giver)).size, 4); assertions++;
+assert.equal(new Set(state.allocations.map(a => a.recipient)).size, 4); assertions++;
+assert.ok(state.allocations.every(a => a.giver !== a.recipient)); assertions++;
+assert.equal(state.allocations.find(a => a.giver === alice.id).recipient, bob.id); assertions++;
+assert.notEqual(state.allocations.find(a => a.giver === bob.id).recipient, alice.id); assertions++;
+await call("/api/signup", signup("Too Late", "late@example.test"), 409);
+await call("/api/admin", { action: "rules", rules: [] }, 409);
+await call("/api/admin", { action: "draw", expectedRules: state.rules }, 409);
+await call("/api/admin", { action: "delete", id: alice.id }, 409);
+const oldToken = state.allocations[0].token;
+const reveal = (await call(`/api/reveal/${oldToken}`)).result;
+assert.ok(reveal.giver); assert.ok(reveal.recipient.name); assert.equal(reveal.recipient.wishes.length, 4); assertions += 3;
+assert.equal(reveal.recipient.email, undefined); assert.equal(reveal.participants, undefined); assertions += 2;
+await call("/api/reveal/invalid", undefined, 404);
+const savedCookie = cookie; cookie = `${cookie}tampered`;
+await call("/api/admin", undefined, 401); cookie = savedCookie;
+await call("/api/admin", { action: "reopen" });
+await call(`/api/reveal/${oldToken}`, undefined, 404);
+for (const p of state.participants) await call("/api/admin", { action: "delete", id: p.id });
+state = (await call("/api/admin")).result;
+assert.equal(state.participants.length, 0); assert.equal(state.rules.length, 0); assert.equal(state.allocations.length, 0); assertions += 3;
+await call("/api/admin/logout", {});
+cookie = ""; await call("/api/admin", undefined, 401);
+for (let attempt = 0; attempt < 8; attempt++) await call("/api/admin/login", { password: "wrong-password" }, 401, { "X-Forwarded-For": "127.0.0.2" });
+await call("/api/admin/login", { password: "wrong-password" }, 429, { "X-Forwarded-For": "127.0.0.2" });
+console.log(`Passed ${assertions} API and persistence assertions. Test exchange is empty again.`);

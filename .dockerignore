@@ -1,0 +1,12 @@
+node_modules
+.next
+.git
+.env*
+.npm-cache
+*.tsbuildinfo
+.DS_Store
+tests
+outputs
+work
+.agents
+.codex
