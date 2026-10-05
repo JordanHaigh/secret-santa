@@ -33,6 +33,8 @@ export async function POST(request: Request) {
         return { ...state, participants: state.participants.filter(p => p.id !== data.id), rules: state.rules.filter(r => r.giver !== data.id && r.recipient !== data.id) };
       }
       throw new ApiError("Unknown admin action.");
+    }, async (client, next) => {
+      if (data.action === "delete") await client.query("DELETE FROM member_accounts WHERE NOT (participant_id = ANY($1::text[]))", [next.participants.map(p => p.id)]);
     });
     return json(state);
   } catch (error) { return errorResponse(error); }

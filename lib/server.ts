@@ -18,22 +18,33 @@ export function db() {
   }
   return globalForDb.santaPool;
 }
-export async function loadState() {
-  const result = await db().query<{ value: Exchange; revision: number }>("SELECT value, revision FROM exchange_state WHERE id = $1", ["exchange"]);
+export async function loadState(client: pg.Pool | pg.PoolClient = db()) {
+  const result = await client.query<{ value: Exchange; revision: number }>("SELECT value, revision FROM exchange_state WHERE id = $1", ["exchange"]);
   const row = result.rows[0];
   return row ? { state: row.value, revision: row.revision } : { state: emptyExchange(), revision: -1 };
 }
-// Optimistic compare-and-swap keeps signups, rules and draws consistent across replicas.
-export async function changeState(transform: (state: Exchange) => Exchange) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const { state, revision } = await loadState();
-    const next = transform(state);
-    const result = revision === -1
-      ? await db().query("INSERT INTO exchange_state (id, value, revision) VALUES ($1, $2::jsonb, 0) ON CONFLICT (id) DO NOTHING", ["exchange", JSON.stringify(next)])
-      : await db().query("UPDATE exchange_state SET value = $1::jsonb, revision = revision + 1 WHERE id = $2 AND revision = $3", [JSON.stringify(next), "exchange", revision]);
-    if (result.rowCount === 1) return next;
-  }
-  throw new ApiError("The exchange changed while you were saving. Please try again.", 409);
+// Compare-and-swap keeps exchange edits consistent; account writes commit with them.
+export async function changeState(transform: (state: Exchange) => Exchange, persist?: (client: pg.PoolClient, next: Exchange) => Promise<void>) {
+  const client = await db().connect();
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await client.query("BEGIN");
+      try {
+        const { state, revision } = await loadState(client);
+        const next = transform(state);
+        const result = revision === -1
+          ? await client.query("INSERT INTO exchange_state (id, value, revision) VALUES ($1, $2::jsonb, 0) ON CONFLICT (id) DO NOTHING", ["exchange", JSON.stringify(next)])
+          : await client.query("UPDATE exchange_state SET value = $1::jsonb, revision = revision + 1 WHERE id = $2 AND revision = $3", [JSON.stringify(next), "exchange", revision]);
+        if (result.rowCount === 1) {
+          await persist?.(client, next);
+          await client.query("COMMIT");
+          return next;
+        }
+        await client.query("ROLLBACK");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+    }
+    throw new ApiError("The exchange changed while you were saving. Please try again.", 409);
+  } finally { client.release(); }
 }
 export function sameOrigin(request: Request) {
   const origin = request.headers.get("origin");

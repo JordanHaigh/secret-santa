@@ -1,0 +1,106 @@
+// Resets only a disposable loopback database to verify migration from a legacy signup.
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import pg from "pg";
+
+const base = process.env.TEST_BASE_URL;
+const database = process.env.DATABASE_URL;
+if (!base || new URL(base).hostname !== "127.0.0.1" || !database || new URL(database).hostname !== "127.0.0.1" || !new URL(database).pathname.startsWith("/secret_santa_accounts_qa_")) throw new Error("Use an isolated loopback account QA server and database.");
+const client = new pg.Client({ connectionString: database });
+await client.connect();
+let checks = 0;
+async function call(path, data, expected = 200, cookie = "", headers = {}) {
+  const response = await fetch(`${base}${path}`, { method: data === undefined ? "GET" : "POST", headers: { Origin: base, ...(data === undefined ? {} : { "Content-Type": "application/json" }), ...(cookie ? { Cookie: cookie } : {}), ...headers }, body: data === undefined ? undefined : JSON.stringify(data) });
+  const result = await response.json();
+  assert.equal(response.status, expected, `${path}: ${JSON.stringify(result)}`); checks++;
+  return { result, cookie: response.headers.get("set-cookie")?.split(";")[0] ?? "", response };
+}
+const details = (name, email, idea) => ({ name, email, notes: "QA notes", wishes: [{ idea, link: "" }] });
+try {
+  await client.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+  await client.query(await readFile("migrations/001_initial.sql", "utf8"));
+  await client.query("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+  await client.query("INSERT INTO schema_migrations (name) VALUES ('001_initial.sql')");
+  const fixture = { id: "legacy-test-member", name: "Legacy QA", email: "legacy@example.test", wishes: [{ idea: "Original legacy wish", link: "" }], notes: "Original notes", joinedAt: "2026-10-01T00:00:00Z" };
+  await client.query("INSERT INTO exchange_state (id,value) VALUES ('exchange',$1)", [JSON.stringify({ participants: [fixture], rules: [], allocations: [], closed: false, drawnAt: null })]);
+  await promisify(execFile)(process.execPath, ["scripts/migrate.mjs"], { env: process.env });
+  const migrated = (await client.query("SELECT * FROM member_accounts WHERE email='legacy@example.test'")).rows[0];
+  assert.ok(migrated.must_change_password); assert.ok(migrated.password_hash.startsWith("scrypt$")); checks += 2;
+  await call("/api/account", undefined, 401);
+  await call("/api/account/login", { email: "unknown@example.test", password: "change-me" }, 401);
+  await call("/api/account/login", { email: "legacy@example.test", password: "wrong" }, 401);
+  const legacy = await call("/api/account/login", { email: " LEGACY@EXAMPLE.TEST ", password: "change-me" });
+  assert.ok(legacy.response.headers.get("set-cookie").includes("HttpOnly"));
+  assert.ok(legacy.response.headers.get("set-cookie").includes("SameSite=Strict")); checks += 2;
+  assert.ok(legacy.response.headers.get("set-cookie").includes("Max-Age=1200")); checks++;
+  if (process.env.EXPECT_SECURE_COOKIES === "1") { assert.ok(legacy.response.headers.get("set-cookie").includes("; Secure")); checks++; }
+  const setup = (await call("/api/account", undefined, 200, legacy.cookie)).result;
+  const secondSetup = await call("/api/account/login", { email: "legacy@example.test", password: "change-me" });
+  assert.deepEqual(setup, { email: "legacy@example.test", mustChangePassword: true }); checks++;
+  await call("/api/account", details("Legacy", "legacy@example.test", "Blocked change"), 403, legacy.cookie);
+  await call("/api/account/password", { currentPassword: "change-me", password: "change-me" }, 400, legacy.cookie);
+  await call("/api/account/password", { currentPassword: "change-me", password: "short" }, 400, legacy.cookie);
+  await call("/api/account/password", { currentPassword: "wrong", password: "legacy-new-password" }, 401, legacy.cookie);
+  const chosen = await call("/api/account/password", { currentPassword: "change-me", password: "legacy-new-password" }, 200, legacy.cookie);
+  let legacyCookie = chosen.cookie;
+  assert.ok(chosen.response.headers.get("set-cookie").includes("Max-Age=604800")); checks++;
+  await call("/api/account", undefined, 401, secondSetup.cookie);
+  await call("/api/account", undefined, 401, `${legacyCookie}tampered`);
+  await call("/api/account", undefined, 401, legacy.cookie);
+  const old = (await call("/api/account", undefined, 200, legacyCookie)).result.participant;
+  assert.equal(old.wishes[0].idea, "Original legacy wish"); assert.equal(old.notes, "Original notes"); assert.equal(old.joinedAt, "2026-10-01T00:00:00Z"); checks += 3;
+  await call("/api/account/login", { email: "legacy@example.test", password: "change-me" }, 401);
+  const secondSession = await call("/api/account/login", { email: "legacy@example.test", password: "legacy-new-password" });
+  const signup = await call("/api/signup", details("New QA", "new@example.test", "First new wish"), 201);
+  assert.equal(signup.result.mustChangePassword, true); checks++;
+  await call("/api/signup", details("Duplicate", "NEW@EXAMPLE.TEST", "Duplicate"), 409);
+  await call("/api/account", details("New", "new@example.test", "Cannot yet edit"), 403, signup.cookie);
+  const newChanged = await call("/api/account/password", { currentPassword: "change-me", password: "new-long-password" }, 200, signup.cookie);
+  const newCookie = newChanged.cookie;
+  const newPerson = (await call("/api/account", undefined, 200, newCookie)).result.participant;
+  const changed = (await call("/api/account", { ...details("Legacy QA Updated", "new@example.test", "Updated book"), id: newPerson.id, wishes: [{ idea: "Updated book", link: "https://example.com/book" }, { idea: "Another idea", link: "" }] }, 200, legacyCookie)).result.participant;
+  assert.equal(changed.id, old.id); assert.equal(changed.email, old.email); assert.equal(changed.joinedAt, old.joinedAt); checks += 3;
+  assert.equal((await call("/api/account", undefined, 200, newCookie)).result.participant.wishes[0].idea, "First new wish"); checks++;
+  await call("/api/account", { ...details("Legacy", "legacy@example.test", "Bad"), wishes: [{ idea: "Bad", link: "javascript:alert(1)" }] }, 400, legacyCookie);
+  await call("/api/account", details("Legacy", "legacy@example.test", "CSRF"), 403, legacyCookie, { Origin: "https://evil.example" });
+  await call("/api/account/password", { currentPassword: "legacy-new-password", password: "another-password" }, 403, legacyCookie, { Origin: "https://evil.example" });
+  const admin = await call("/api/admin/login", { password: process.env.ADMIN_PASSWORD });
+  await call("/api/account", undefined, 401, admin.cookie);
+  await call("/api/admin", undefined, 401, legacyCookie);
+  let state = (await call("/api/admin", undefined, 200, admin.cookie)).result;
+  assert.ok(!JSON.stringify(state).includes("password_hash")); checks++;
+  state = (await call("/api/admin", { action: "draw", expectedRules: state.rules }, 200, admin.cookie)).result;
+  const originalAllocations = state.allocations;
+  const token = state.allocations.find(a => a.recipient === old.id).token;
+  await call("/api/account", details("Legacy QA Updated", "legacy@example.test", "Changed after the draw"), 200, legacyCookie);
+  assert.equal((await call(`/api/reveal/${token}`)).result.recipient.wishes[0].idea, "Changed after the draw"); checks++;
+  assert.deepEqual((await call("/api/admin", undefined, 200, admin.cookie)).result.allocations, originalAllocations); checks++;
+  // A password change revokes every old session and persists across migration reruns.
+  const updated = await call("/api/account/password", { currentPassword: "legacy-new-password", password: "legacy-final-password" }, 200, legacyCookie);
+  legacyCookie = updated.cookie;
+  await call("/api/account", undefined, 401, secondSession.cookie);
+  const savedHash = (await client.query("SELECT password_hash FROM member_accounts WHERE participant_id=$1", [old.id])).rows[0].password_hash;
+  await promisify(execFile)(process.execPath, ["scripts/migrate.mjs"], { env: process.env });
+  assert.equal((await client.query("SELECT password_hash FROM member_accounts WHERE participant_id=$1", [old.id])).rows[0].password_hash, savedHash); checks++;
+  await call("/api/account/logout", {}, 200, legacyCookie);
+  await call("/api/account", undefined, 401, legacyCookie);
+  const finalLogin = await call("/api/account/login", { email: old.email, password: "legacy-final-password" }, 200, "", { "X-Forwarded-For": "account-qa-final" });
+  assert.equal((await call("/api/account", undefined, 200, finalLogin.cookie)).result.participant.wishes[0].idea, "Changed after the draw"); checks++;
+  await client.query("UPDATE member_sessions SET expires_at=NOW()-INTERVAL '1 minute' WHERE token_hash=$1", [createHash("sha256").update(finalLogin.cookie.split("=")[1]).digest("hex")]);
+  await call("/api/account", undefined, 401, finalLogin.cookie);
+  await call("/api/admin", { action: "reopen" }, 200, admin.cookie);
+  await call("/api/admin", { action: "delete", id: newPerson.id }, 200, admin.cookie);
+  await call("/api/account", undefined, 401, newCookie);
+  assert.equal((await client.query("SELECT COUNT(*) FROM member_sessions WHERE participant_id=$1", [newPerson.id])).rows[0].count, "0"); checks++;
+  // Signup state and account/session creation roll back as one transaction.
+  await client.query("INSERT INTO member_accounts (participant_id,email,password_hash) VALUES ('orphan-qa','rollback@example.test',$1)", [savedHash]);
+  await call("/api/signup", details("Rollback QA", "rollback@example.test", "Must not be saved"), 503);
+  assert.equal((await call("/api/admin", undefined, 200, admin.cookie)).result.participants.some(p => p.email === "rollback@example.test"), false); checks++;
+  await client.query("DELETE FROM member_accounts WHERE participant_id='orphan-qa'");
+  for (let attempt = 0; attempt < 8; attempt++) await call("/api/account/login", { email: "limit@example.test", password: "wrong" }, 401, "", { "X-Forwarded-For": "account-qa-rate" });
+  await call("/api/account/login", { email: "limit@example.test", password: "wrong" }, 429, "", { "X-Forwarded-For": "account-qa-rate" });
+  console.log(`Passed ${checks} migration, account, privacy, editing and session assertions.`);
+} finally { await client.end(); }

@@ -1,6 +1,9 @@
 import pg from "pg";
 import { readFile, readdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { randomBytes, scrypt } from "node:crypto";
+import { promisify } from "node:util";
+const derive = promisify(scrypt);
 
 if (!process.env.DATABASE_URL) {
   console.error("DATABASE_URL is required. Set it to your Coolify PostgreSQL internal connection URL.");
@@ -17,6 +20,15 @@ try {
     await client.query("BEGIN");
     try {
       await client.query(await readFile(`${directory}/${name}`, "utf8"));
+      if (name === "002_member_accounts.sql") {
+        // Give each existing submission its own salted default-password hash.
+        const rows = await client.query("SELECT value FROM exchange_state WHERE id = 'exchange' FOR UPDATE");
+        for (const participant of rows.rows[0]?.value.participants ?? []) {
+          const salt = randomBytes(16).toString("hex");
+          const key = await derive("change-me", salt, 64);
+          await client.query("INSERT INTO member_accounts (participant_id, email, password_hash) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING", [participant.id, participant.email.toLowerCase(), `scrypt$${salt}$${key.toString("hex")}`]);
+        }
+      }
       await client.query("INSERT INTO schema_migrations (name) VALUES ($1)", [name]);
       await client.query("COMMIT");
       console.log(`Applied migration ${name}`);

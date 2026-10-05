@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#f6f5ef"/>
+  <rect x="34" y="34" width="1132" height="562" rx="30" fill="#fffef9" stroke="#e0e4d8" stroke-width="2"/>
+  <circle cx="600" cy="171" r="73" fill="#365642"/>
+  <g transform="translate(554 119) scale(1.45)" fill="none" stroke="#f4f0df" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M17 28h30v9H17zM20 37v15h24V37M32 28v24M32 28c-14 0-16-14-9-14 6 0 9 14 9 14Zm0 0c14 0 16-14 9-14-6 0-9 14-9 14Z"/>
+  </g>
+  <g fill="#2c4435" text-anchor="middle" font-family="Georgia, serif" font-weight="bold">
+    <text x="600" y="326" font-size="66">Family Secret Santa</text>
+  </g>
+  <text x="600" y="383" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" fill="#657362">A little mystery. A gift for someone you love.</text>
+  <rect x="456" y="427" width="288" height="58" rx="29" fill="#eaf0e5"/>
+  <text x="600" y="465" text-anchor="middle" font-family="Arial, sans-serif" font-size="26" font-weight="bold" fill="#365642">$150 gift budget</text>
+</svg>
