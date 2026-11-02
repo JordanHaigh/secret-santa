@@ -14,6 +14,7 @@ A complete, self-hosted Secret Santa exchange built with Next.js, React and Post
 - Required (“must give to”) and excluded (“can’t give to”) pairings. Rules are directional, with a checkbox to apply both directions.
 - Randomised allocation: everyone gives to one recipient and receives from one giver, with no self-pairings. Required and excluded rules are respected. Conflicts and impossible draws produce useful errors.
 - Private, unguessable reveal links showing only the recipient’s name, wishes and notes. Admins can copy each link or export all of them.
+- Once names are drawn, each pairing has a ready-to-send Christmas message with the giver’s greeting, recipient’s name, all wishlist ideas and their original gift links, any notes, the **$150 budget**, and a reminder to bring a **separate $20 Dirty Santa joke present for Christmas Eve**. Messages do not link back to this site. Preview or copy messages individually, or export them as CSV. Messages use the wishlist currently loaded in admin; refresh responses before copying if someone has updated their ideas.
 - Reopening a draw keeps participants and rules, clears the allocations, invalidates old links and opens signups again.
 - Durable PostgreSQL storage, concurrency-safe state updates, automatic transactional migrations, rate-limited login and signup, signed eight-hour admin sessions, and CSRF origin checks.
 
